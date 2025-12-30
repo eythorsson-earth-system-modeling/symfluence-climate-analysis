@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 SYMFLUENCE Köppen-Geiger Climate Classification Tool
-Advanced climate analysis using NASA NEX-GDDP data
+Advanced climate analysis using Google Earth Engine
 Built by Darri Eythorsson - University of Calgary
 """
 
@@ -47,103 +47,66 @@ st.markdown("""
 def initialize_ee():
     """Initialize Earth Engine"""
     try:
-        ee.Initialize(project='ee-koppengeiger')
+        ee.Initialize()
         return True, "✅ Earth Engine connected successfully"
     except Exception as e:
-        return False, f"❌ Earth Engine initialization failed: {str(e)}"
-
-def classify_koppen_geiger(year, scenario='historical'):
-    """Classify Köppen-Geiger climate for a given year"""
-    
-    try:
-        # Import NASA NEX-GDDP data
-        imageCollection = ee.ImageCollection("NASA/NEX-GDDP")
-        
-        # Filter for specific year and scenario
-        if scenario == 'historical':
-            filtered = imageCollection.filterDate(f'{year}-01-01', f'{year}-12-31')
-        else:
-            filtered = imageCollection.filter(ee.Filter.eq('scenario', scenario)).filterDate(f'{year}-01-01', f'{year}-12-31')
-        
-        # Extract temperature and precipitation
-        tmax_year = filtered.select('tasmax')
-        tmin_year = filtered.select('tasmin')
-        prec_year = filtered.select('pr')
-        
-        # Calculate monthly averages
-        monthly_data = []
-        for month in range(1, 13):
-            tmax_month = tmax_year.filter(ee.Filter.eq('month', month)).mean()
-            tmin_month = tmin_year.filter(ee.Filter.eq('month', month)).mean()
-            prec_month = prec_year.filter(ee.Filter.eq('month', month)).mean()
-            
-            monthly_data.append({
-                'month': month,
-                'tmax': tmax_month,
-                'tmin': tmin_month,
-                'prec': prec_month
-            })
-        
-        return monthly_data
-        
-    except Exception as e:
-        st.error(f"Climate classification failed: {str(e)}")
-        return None
+        try:
+            ee.Authenticate()
+            ee.Initialize()
+            return True, "✅ Earth Engine authenticated and connected"
+        except Exception as e2:
+            return False, f"❌ Earth Engine initialization failed: {str(e2)}"
 
 def analyze_point_climate(lat, lon, start_year, end_year):
-    """Analyze climate at a specific point"""
+    """Analyze climate at a specific point using ECMWF ERA5 data"""
     
     try:
         point = ee.Geometry.Point([lon, lat])
-        imageCollection = ee.ImageCollection("NASA/NEX-GDDP")
+        
+        # Use ERA5 monthly data instead of NASA NEX-GDDP
+        era5_monthly = ee.ImageCollection("ECMWF/ERA5/MONTHLY")
         
         climate_data = []
         
         for year in range(start_year, end_year + 1):
-            yearly_data = imageCollection.filterDate(f'{year}-01-01', f'{year}-12-31')
+            yearly_data = era5_monthly.filterDate(f'{year}-01-01', f'{year}-12-31')
             
-            # Annual averages
-            tmax_annual = yearly_data.select('tasmax').mean().reduceRegion(
+            # Temperature (convert from Kelvin to Celsius)
+            temp_2m = yearly_data.select('mean_2m_air_temperature').mean().subtract(273.15)
+            
+            # Precipitation (convert from m to mm)
+            precip = yearly_data.select('total_precipitation').sum().multiply(1000)
+            
+            # Extract values at point
+            temp_value = temp_2m.reduceRegion(
                 reducer=ee.Reducer.mean(),
                 geometry=point,
                 scale=25000,
                 maxPixels=1e6
-            )
+            ).getInfo()
             
-            tmin_annual = yearly_data.select('tasmin').mean().reduceRegion(
+            precip_value = precip.reduceRegion(
                 reducer=ee.Reducer.mean(),
                 geometry=point,
                 scale=25000,
                 maxPixels=1e6
-            )
-            
-            prec_annual = yearly_data.select('pr').sum().reduceRegion(
-                reducer=ee.Reducer.mean(),
-                geometry=point,
-                scale=25000,
-                maxPixels=1e6
-            )
+            ).getInfo()
             
             climate_data.append({
                 'year': year,
-                'tmax_annual': tmax_annual.getInfo().get('tasmax', 0) - 273.15,  # Convert to Celsius
-                'tmin_annual': tmin_annual.getInfo().get('tasmin', 0) - 273.15,
-                'prec_annual': prec_annual.getInfo().get('pr', 0) * 365,  # Convert to annual
-                'tmean_annual': (tmax_annual.getInfo().get('tasmax', 273.15) + tmin_annual.getInfo().get('tasmin', 273.15)) / 2 - 273.15
+                'tmean_annual': temp_value.get('mean_2m_air_temperature', 0),
+                'prec_annual': precip_value.get('total_precipitation', 0)
             })
         
         return pd.DataFrame(climate_data)
         
     except Exception as e:
-        st.error(f"Point climate analysis failed: {str(e)}")
+        st.error(f"Climate analysis failed: {str(e)}")
         return None
 
-def classify_climate_type(tmax, tmin, prec):
-    """Simple Köppen-Geiger classification logic"""
+def classify_climate_type(tmean, prec):
+    """Simplified Köppen-Geiger classification"""
     
-    tmean = (tmax + tmin) / 2
-    
-    # Simplified classification
     if tmean < -3:
         if prec < 400:
             return "ET - Tundra"
@@ -241,8 +204,7 @@ def create_climate_dashboard(df):
     with col5:
         # Classify current climate
         recent_climate = classify_climate_type(
-            df['tmax_annual'].iloc[-1],
-            df['tmin_annual'].iloc[-1], 
+            df['tmean_annual'].iloc[-1],
             df['prec_annual'].iloc[-1]
         )
         st.metric("🌍 Climate Type", recent_climate)
@@ -254,7 +216,7 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>🌍 SYMFLUENCE Climate Classification</h1>
-        <p>Köppen-Geiger climate analysis using NASA NEX-GDDP data</p>
+        <p>Köppen-Geiger climate analysis using ECMWF ERA5 data</p>
         <p><em>Built by Darri Eythorsson, University of Calgary</em></p>
     </div>
     """, unsafe_allow_html=True)
@@ -263,137 +225,105 @@ def main():
     ee_status, ee_message = initialize_ee()
     
     if ee_status:
-        st.markdown(f'<div class="success-box">{ee_message}</div>', unsafe_allow_html=True)
+        st.success(ee_message)
     else:
         st.error(ee_message)
+        st.info("Please authenticate with Google Earth Engine to use this application.")
         st.stop()
     
     # Sidebar controls
     st.sidebar.markdown("## 🌡️ Climate Analysis Controls")
     
-    # Analysis mode
-    analysis_mode = st.sidebar.radio(
-        "🔬 Analysis Mode",
-        ["Point Climate Analysis", "Regional Classification", "Climate Trends"],
-        help="Choose your climate analysis approach"
-    )
+    st.markdown("## 📍 Point Climate Analysis")
     
-    if analysis_mode == "Point Climate Analysis":
-        st.markdown("## 📍 Point Climate Analysis")
-        
-        # Coordinate input
-        col1, col2 = st.columns(2)
-        with col1:
-            input_lat = st.number_input("Latitude", value=51.1784, min_value=-90.0, max_value=90.0, step=0.01, format="%.4f")
-        with col2:
-            input_lon = st.number_input("Longitude", value=-115.5708, min_value=-180.0, max_value=180.0, step=0.01, format="%.4f")
-        
-        # Year range
-        col1, col2 = st.columns(2)
-        with col1:
-            start_year = st.number_input("Start Year", value=2000, min_value=1950, max_value=2020, step=1)
-        with col2:
-            end_year = st.number_input("End Year", value=2020, min_value=1950, max_value=2020, step=1)
-        
-        if st.button("🚀 Analyze Climate", type="primary"):
-            if start_year >= end_year:
-                st.error("❌ Start year must be before end year")
-                st.stop()
-            
-            with st.spinner(f"🔄 Analyzing climate at ({input_lat:.4f}, {input_lon:.4f})..."):
-                climate_df = analyze_point_climate(input_lat, input_lon, start_year, end_year)
-            
-            if climate_df is not None and not climate_df.empty:
-                # Display results
-                st.markdown("### 📊 Climate Analysis Results")
-                
-                # Climate dashboard
-                create_climate_dashboard(climate_df)
-                
-                # Time series chart
-                climate_chart = create_climate_time_series(climate_df, input_lat, input_lon)
-                st.plotly_chart(climate_chart, use_container_width=True)
-                
-                # Climate classification over time
-                st.markdown("### 🌍 Climate Classification Over Time")
-                
-                climate_df['climate_type'] = climate_df.apply(
-                    lambda row: classify_climate_type(row['tmax_annual'], row['tmin_annual'], row['prec_annual']), 
-                    axis=1
-                )
-                
-                # Show climate evolution
-                climate_evolution = climate_df[['year', 'climate_type']].copy()
-                st.dataframe(climate_evolution, use_container_width=True)
-                
-                # Download data
-                st.markdown("### 💾 Download Climate Data")
-                csv_data = climate_df.to_csv(index=False)
-                st.download_button(
-                    label="📥 Download Climate Analysis CSV",
-                    data=csv_data,
-                    file_name=f"climate_analysis_{input_lat:.4f}_{input_lon:.4f}_{start_year}_{end_year}.csv",
-                    mime="text/csv"
-                )
-            else:
-                st.warning("❌ No climate data found for the specified location and period")
+    # Coordinate input
+    col1, col2 = st.columns(2)
+    with col1:
+        input_lat = st.number_input("Latitude", value=51.1784, min_value=-90.0, max_value=90.0, step=0.01, format="%.4f")
+    with col2:
+        input_lon = st.number_input("Longitude", value=-115.5708, min_value=-180.0, max_value=180.0, step=0.01, format="%.4f")
     
-    elif analysis_mode == "Regional Classification":
-        st.markdown("## 🗺️ Regional Climate Classification")
-        st.info("🚧 Regional classification mode - Coming soon!")
+    # Year range
+    col1, col2 = st.columns(2)
+    with col1:
+        start_year = st.number_input("Start Year", value=2010, min_value=1979, max_value=2022, step=1)
+    with col2:
+        end_year = st.number_input("End Year", value=2022, min_value=1979, max_value=2022, step=1)
+    
+    if st.button("🚀 Analyze Climate", type="primary"):
+        if start_year >= end_year:
+            st.error("❌ Start year must be before end year")
+            st.stop()
+        
+        with st.spinner(f"🔄 Analyzing climate at ({input_lat:.4f}, {input_lon:.4f})..."):
+            climate_df = analyze_point_climate(input_lat, input_lon, start_year, end_year)
+        
+        if climate_df is not None and not climate_df.empty:
+            # Display results
+            st.markdown("### 📊 Climate Analysis Results")
+            
+            # Climate dashboard
+            create_climate_dashboard(climate_df)
+            
+            # Time series chart
+            climate_chart = create_climate_time_series(climate_df, input_lat, input_lon)
+            st.plotly_chart(climate_chart, use_container_width=True)
+            
+            # Climate classification over time
+            st.markdown("### 🌍 Climate Classification Over Time")
+            
+            climate_df['climate_type'] = climate_df.apply(
+                lambda row: classify_climate_type(row['tmean_annual'], row['prec_annual']), 
+                axis=1
+            )
+            
+            # Show climate evolution
+            climate_evolution = climate_df[['year', 'climate_type']].copy()
+            st.dataframe(climate_evolution, use_container_width=True)
+            
+            # Download data
+            st.markdown("### 💾 Download Climate Data")
+            csv_data = climate_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Climate Analysis CSV",
+                data=csv_data,
+                file_name=f"climate_analysis_{input_lat:.4f}_{input_lon:.4f}_{start_year}_{end_year}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.warning("❌ No climate data found for the specified location and period")
+    
+    # Welcome info
+    st.markdown("## 🌟 About This Tool")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
         st.markdown("""
-        **Planned Features:**
-        - Interactive regional climate maps
-        - Climate zone boundaries
-        - Comparative analysis between regions
-        - Climate change projections
+        ### 🎯 Features
+        - **Point Climate Analysis**: Detailed location-specific climate data
+        - **Köppen-Geiger Classification**: Automatic climate type identification
+        - **Time Series Analysis**: Multi-decade climate trends
+        - **Temperature & Precipitation**: Dual-axis visualizations
+        - **Climate Evolution**: Track climate type changes over time
         """)
     
-    elif analysis_mode == "Climate Trends":
-        st.markdown("## 📈 Climate Trends Analysis")
-        st.info("🚧 Climate trends mode - Coming soon!")
+    with col2:
         st.markdown("""
-        **Planned Features:**
-        - Long-term temperature trends
-        - Precipitation pattern changes
-        - Climate shift detection
-        - Future scenario analysis
+        ### 📊 Data Sources
+        - **ECMWF ERA5**: High-quality reanalysis data
+        - **Time Range**: 1979-2022 (monthly resolution)
+        - **Resolution**: 25km global coverage
+        - **Variables**: Temperature, Precipitation
+        - **Quality**: Research-grade climate data
         """)
-    
-    else:
-        # Welcome screen
-        st.markdown("## 🌟 Welcome to SYMFLUENCE Climate Analysis")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("""
-            ### 🎯 Features
-            - **Point Climate Analysis**: Detailed location-specific climate data
-            - **Köppen-Geiger Classification**: Automatic climate type identification
-            - **Time Series Analysis**: Multi-decade climate trends
-            - **Temperature & Precipitation**: Dual-axis visualizations
-            - **Climate Evolution**: Track climate type changes over time
-            """)
-        
-        with col2:
-            st.markdown("""
-            ### 📊 Data Sources
-            - **NASA NEX-GDDP**: Downscaled climate projections
-            - **Time Range**: 1950-2100 (historical and projections)
-            - **Resolution**: 25km global coverage
-            - **Variables**: Temperature (max/min), Precipitation
-            - **Scenarios**: Historical, RCP4.5, RCP8.5
-            """)
-        
-        st.info("👈 Select an analysis mode in the sidebar to begin!")
     
     # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666; padding: 2rem;'>
         <strong>SYMFLUENCE Köppen-Geiger Climate Classification Tool</strong><br>
-        Advanced climate analysis using NASA NEX-GDDP satellite data<br>
+        Advanced climate analysis using ECMWF ERA5 reanalysis data<br>
         Built by <strong>Darri Eythorsson</strong>, University of Calgary<br>
         Contact: <a href='mailto:darri@symfluence.org'>darri@symfluence.org</a>
     </div>
